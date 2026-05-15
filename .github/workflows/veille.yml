@@ -1,0 +1,50 @@
+name: Veille Immobilière 37
+
+on:
+  schedule:
+    # 7h00 heure de Paris (UTC+2 en été, UTC+1 en hiver)
+    # En été  (mars-oct) : 7h Paris = 5h UTC
+    # En hiver (oct-mars): 7h Paris = 6h UTC
+    # On choisit 5h UTC — légèrement en avance en hiver, parfait en été
+    - cron: '0 5 * * *'
+  workflow_dispatch:  # permet de lancer manuellement depuis GitHub
+
+jobs:
+  veille:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # nécessaire pour sauvegarder seen_listings.json
+
+    steps:
+      - name: Checkout du dépôt
+        uses: actions/checkout@v4
+
+      - name: Restaurer seen_listings.json (mémoire des annonces déjà vues)
+        run: |
+          if [ ! -f seen_listings.json ]; then
+            echo '{}' > seen_listings.json
+          fi
+
+      - name: Installer Python et les dépendances
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Installer les packages
+        run: pip install -r requirements.txt
+
+      - name: Lancer la veille
+        env:
+          EMAIL_TO:  ${{ secrets.EMAIL_TO }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+        run: python veille.py
+
+      - name: Sauvegarder seen_listings.json et le rapport dans le dépôt
+        run: |
+          git config user.name  "Veille Bot"
+          git config user.email "actions@github.com"
+          git add seen_listings.json veille_*.md
+          git diff --staged --quiet || git commit -m "Veille ${{ github.run_id }} — $(date +%Y-%m-%d)"
+          git push
