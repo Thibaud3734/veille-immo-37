@@ -312,10 +312,22 @@ LBC_CAT_LABELS = {
 }
 
 
+LBC_STEALTH_JS = """
+    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+    window.chrome = {runtime: {}, loadTimes: () => {}, csi: () => {}, app: {}};
+    Object.defineProperty(navigator, 'plugins', {get: () => ({length: 5})});
+    Object.defineProperty(navigator, 'languages', {get: () => ['fr-FR', 'fr', 'en']});
+    Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'});
+"""
+
+
 async def _scrape_leboncoin_async(seen: dict) -> list:
     results = []
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
         context = await browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -326,14 +338,16 @@ async def _scrape_leboncoin_async(seen: dict) -> list:
             viewport={"width": 1280, "height": 800},
             extra_http_headers={"Accept-Language": "fr-FR,fr;q=0.9"},
         )
+        await context.add_init_script(LBC_STEALTH_JS)
         page = await context.new_page()
         try:
             await page.goto(
-                "https://www.leboncoin.fr/c/bureaux_commerces",
+                "https://www.leboncoin.fr/recherche?category=8&locations=Indre-et-Loire_37",
                 timeout=30000,
-                wait_until="domcontentloaded",
+                wait_until="networkidle",
             )
             await page.wait_for_timeout(3000)
+            log.info(f"LeBonCoin : URL={page.url} | titre={await page.title()}")
 
             next_data = await page.evaluate(
                 "() => { const el = document.getElementById('__NEXT_DATA__'); "
