@@ -6,7 +6,7 @@ on:
     # En été  (mars-oct) : 7h Paris = 5h UTC
     # En hiver (oct-mars): 7h Paris = 6h UTC
     # On choisit 5h UTC — légèrement en avance en hiver, parfait en été
-    - cron: '0 8 * * *'
+    - cron: '40 7 * * *'
   workflow_dispatch:  # permet de lancer manuellement depuis GitHub
 
 jobs:
