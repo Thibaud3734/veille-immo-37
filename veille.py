@@ -341,15 +341,20 @@ async def _scrape_leboncoin_async(seen: dict) -> list:
         await context.add_init_script(LBC_STEALTH_JS)
         page = await context.new_page()
         captured_ads: list = []
+        net_log: list = []
 
         async def intercept(response):
-            if ("api.leboncoin.fr" in response.url or "lstg/search" in response.url
-                    or "/find" in response.url) and response.status == 200:
+            url = response.url
+            if "leboncoin" in url:
+                net_log.append(f"{response.status} {url[:120]}")
+            if response.status == 200 and "leboncoin" in url:
                 try:
-                    body = await response.json()
-                    if isinstance(body, dict) and "ads" in body:
-                        captured_ads.extend(body["ads"])
-                        log.info(f"LeBonCoin API interceptée : {len(body['ads'])} annonces")
+                    ct = response.headers.get("content-type", "")
+                    if "json" in ct:
+                        body = await response.json()
+                        if isinstance(body, dict) and "ads" in body:
+                            captured_ads.extend(body["ads"])
+                            log.info(f"LeBonCoin API: {len(body['ads'])} annonces — {url[:80]}")
                 except Exception:
                     pass
 
@@ -361,13 +366,37 @@ async def _scrape_leboncoin_async(seen: dict) -> list:
                 wait_until="networkidle",
             )
             await page.wait_for_timeout(4000)
-            log.info(f"LeBonCoin : {len(captured_ads)} annonces interceptées")
+
+            for entry in net_log[:20]:
+                log.info(f"LBC net: {entry}")
+
+            if not captured_ads:
+                # Fallback : extraire les liens d'annonces directement du DOM
+                log.warning("LeBonCoin : API non interceptée, tentative DOM")
+                ad_hrefs = await page.eval_on_selector_all(
+                    "a[href*='/ad/']",
+                    "els => [...new Set(els.map(e => e.href))].filter(h => h.includes('bureaux') || h.includes('commerce') || h.includes('local'))"
+                )
+                log.info(f"LeBonCoin DOM : {len(ad_hrefs)} liens trouvés")
+                for href in ad_hrefs[:30]:
+                    if not is_new(href, seen):
+                        continue
+                    listing = {
+                        "source": "LeBonCoin",
+                        "type": "Bureau / Local commercial",
+                        "titre": href.split("/")[-1].replace("-", " ").split(".")[0][:80],
+                        "localisation": DEPT_NAME,
+                        "surface": "N/A", "prix": "N/A", "agence": "N/A",
+                        "description": "Voir l'annonce pour les détails",
+                        "url": href, "reference": "", "date": "",
+                    }
+                    results.append(listing)
+                    mark_seen(href, seen)
+                log.info(f"LeBonCoin DOM : {len(results)} nouvelles annonces")
+                return results
 
             ads_37 = [a for a in captured_ads
                       if a.get("location", {}).get("department_id") == DEPT]
-            if not captured_ads:
-                log.warning("LeBonCoin : aucune réponse API interceptée")
-                return results
             log.info(f"LeBonCoin : {len(captured_ads)} annonces totales, {len(ads_37)} en dept 37")
 
             for ad in ads_37:
