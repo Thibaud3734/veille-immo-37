@@ -34,11 +34,16 @@ jobs:
       - name: Installer les packages
         run: pip install -r requirements.txt
 
+      - name: Installer Playwright et Chromium
+        run: playwright install chromium --with-deps
+
       - name: Lancer la veille
         env:
-          EMAIL_TO:  ${{ secrets.EMAIL_TO }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO:        ${{ secrets.EMAIL_TO }}
+          SMTP_USER:       ${{ secrets.SMTP_USER }}
+          SMTP_PASS:       ${{ secrets.SMTP_PASS }}
+          EQUIMMOX_EMAIL:  ${{ secrets.EQUIMMOX_EMAIL }}
+          EQUIMMOX_PASS:   ${{ secrets.EQUIMMOX_PASS }}
         run: python veille.py
 
       - name: Sauvegarder seen_listings.json et le rapport dans le dépôt

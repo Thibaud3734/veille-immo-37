@@ -4,6 +4,7 @@ Veille immobilière commerciale — Indre-et-Loire (37)
 Version cloud : email via SMTP Office 365
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -18,15 +19,18 @@ from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 TODAY = datetime.now().strftime("%Y-%m-%d")
 DEPT = "37"
 DEPT_NAME = "Indre-et-Loire"
 
-EMAIL_TO   = os.environ["EMAIL_TO"]    # t.segeon@la-ie.fr
-SMTP_USER  = os.environ["SMTP_USER"]   # compte expéditeur Office 365
-SMTP_PASS  = os.environ["SMTP_PASS"]   # mot de passe ou app password
+EMAIL_TO        = os.environ["EMAIL_TO"]          # t.segeon@la-ie.fr
+SMTP_USER       = os.environ["SMTP_USER"]        # compte expéditeur Office 365
+SMTP_PASS       = os.environ["SMTP_PASS"]        # mot de passe ou app password
+EQUIMMOX_EMAIL  = os.environ.get("EQUIMMOX_EMAIL", "")
+EQUIMMOX_PASS   = os.environ.get("EQUIMMOX_PASS", "")
 
 # seen_listings stocké en JSON dans la variable d'env SEEN_JSON (GitHub Actions artifact)
 SEEN_JSON_PATH = Path("seen_listings.json")
@@ -81,6 +85,12 @@ ARTHUR_LOYD_SLUGS = ["bureau-location", "terrain-location"]
 GEOLOCAUX_BASE   = "https://www.geolocaux.com"
 ARTHUR_LOYD_BASE = "https://www.arthur-loyd.com"
 WEADVISOR_BASE   = "https://www.weadvisor.fr"
+EQUIMMOX_LOGIN   = "https://app.equimmox.com/connexion"
+EQUIMMOX_SEARCH  = (
+    "https://app.equimmox.com/?pmn=&pmx=&cl=Office_Commercial&smn=&smx=&slt=1"
+    "&dmn=&dmx=&oc=&act=true&kw=&dp=Indre-et-Loire&rg=&ct=&prmn=&prmx=&rd="
+    "&p2n=&p2x=&ptp=&bin=&bex=&loc=&mef=true&xtc=&erp="
+)
 
 WEADVISOR_SEARCHES = [
     ("/locaux-commerciaux-location/indre-et-loire", "Local commercial — Location"),
@@ -295,6 +305,158 @@ def scrape_weadvisor(seen: dict) -> list:
     return results
 
 
+# ── Scraper LeBonCoin ─────────────────────────────────────────────────────────
+LBC_HEADERS = {
+    **HEADERS,
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "none",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+}
+LBC_CAT_LABELS = {
+    "8": "Bureau / Local commercial",
+    "9": "Local d'activité",
+}
+
+
+def scrape_leboncoin(seen: dict) -> list:
+    results = []
+    try:
+        r = SESSION.get(
+            "https://www.leboncoin.fr/c/bureaux_commerces",
+            headers=LBC_HEADERS,
+            timeout=25,
+        )
+        r.raise_for_status()
+    except Exception as e:
+        log.warning(f"LeBonCoin fetch : {e}")
+        return results
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    nd = soup.find("script", id="__NEXT_DATA__")
+    if not nd:
+        log.warning("LeBonCoin : NEXT_DATA absent (bot-detection probable)")
+        return results
+
+    try:
+        data = json.loads(nd.string)
+        ads = (data.get("props", {})
+                   .get("pageProps", {})
+                   .get("searchData", {})
+                   .get("ads", []))
+    except Exception as e:
+        log.warning(f"LeBonCoin JSON parse : {e}")
+        return results
+
+    ads_37 = [a for a in ads if a.get("location", {}).get("department_id") == DEPT]
+    log.info(f"LeBonCoin : {len(ads)} annonces nationales, {len(ads_37)} en dept 37")
+
+    for ad in ads_37:
+        url = ad.get("url", "")
+        if not url or not is_new(url, seen):
+            continue
+        attrs = {a["key"]: a.get("value_label", (a.get("values") or [""])[0])
+                 for a in ad.get("attributes", []) if "key" in a}
+        prix_raw = ad.get("price", [None])[0] if ad.get("price") else None
+        cat_id = str(ad.get("category_id", "8"))
+        listing = {
+            "source": "LeBonCoin",
+            "type": LBC_CAT_LABELS.get(cat_id, "Bureau / Local commercial"),
+            "titre": ad.get("subject", "N/A"),
+            "localisation": ad.get("location", {}).get("city", DEPT_NAME),
+            "surface": attrs.get("square", "N/A"),
+            "prix": f"{prix_raw:,} €".replace(",", " ") if prix_raw else "N/A",
+            "agence": ad.get("owner", {}).get("name", "Particulier"),
+            "description": (ad.get("body") or "")[:400],
+            "url": url,
+            "reference": str(ad.get("list_id", "")),
+            "date": (ad.get("first_publication_date") or "")[:10],
+        }
+        results.append(listing)
+        mark_seen(url, seen)
+
+    log.info(f"LeBonCoin: {len(results)} nouvelles annonces en dept 37")
+    return results
+
+
+# ── Scraper Equimmox (Playwright) ─────────────────────────────────────────────
+
+async def _scrape_equimmox_async(seen: dict) -> list:
+    if not EQUIMMOX_EMAIL or not EQUIMMOX_PASS:
+        log.warning("Equimmox : identifiants manquants (EQUIMMOX_EMAIL / EQUIMMOX_PASS)")
+        return []
+    results = []
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        try:
+            await page.goto(EQUIMMOX_LOGIN, timeout=30000)
+            await page.fill('input[type="email"]', EQUIMMOX_EMAIL)
+            await page.fill('input[type="password"]', EQUIMMOX_PASS)
+            await page.click('button:has-text("Se connecter")')
+            await page.wait_for_url("https://app.equimmox.com/**", timeout=20000)
+
+            await page.goto(EQUIMMOX_SEARCH, timeout=30000)
+            await page.wait_for_selector(".bubble-element.group-item", timeout=25000)
+
+            # Scroll pour charger toutes les annonces
+            for _ in range(6):
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(2000)
+
+            cards = await page.eval_on_selector_all(
+                ".bubble-element.group-item",
+                "els => els.map(el => el.innerText.trim())"
+            )
+            log.info(f"Equimmox : {len(cards)} cartes trouvées")
+
+            for text in cards:
+                parts = [p.strip() for p in text.split("\n") if p.strip()]
+                if len(parts) < 5:
+                    continue
+                # Format confirmé : prix_m2 / date / type / ville / prix / surface
+                prix_m2  = parts[0]
+                date_pub = parts[1]
+                type_bien = parts[2]
+                city     = parts[3]
+                prix     = parts[4]
+                surface  = parts[5] if len(parts) > 5 else "N/A"
+
+                uid = f"equimmox_{type_bien}_{city}_{surface}_{prix}".replace(" ", "_")
+                if not is_new(uid, seen):
+                    continue
+
+                listing = {
+                    "source": "Equimmox",
+                    "type": type_bien,
+                    "titre": f"{type_bien} — {city}",
+                    "localisation": city,
+                    "surface": surface,
+                    "prix": prix,
+                    "agence": "Equimmox",
+                    "description": f"{prix_m2} | Publié le {date_pub}",
+                    "url": EQUIMMOX_SEARCH,
+                    "reference": "",
+                    "date": date_pub,
+                }
+                results.append(listing)
+                mark_seen(uid, seen)
+
+        except Exception as e:
+            log.error(f"Equimmox : erreur scraping — {e}")
+        finally:
+            await browser.close()
+
+    log.info(f"Equimmox : {len(results)} nouvelles annonces")
+    return results
+
+
+def scrape_equimmox(seen: dict) -> list:
+    return asyncio.run(_scrape_equimmox_async(seen))
+
+
 # ── Rapport ───────────────────────────────────────────────────────────────────
 
 def build_report(all_listings: list, inaccessible: list) -> str:
@@ -381,6 +543,8 @@ def main():
         ("Geolocaux",   scrape_geolocaux),
         ("Arthur Loyd", scrape_arthur_loyd),
         ("Weadvisor",   scrape_weadvisor),
+        ("LeBonCoin",   scrape_leboncoin),
+        ("Equimmox",    scrape_equimmox),
     ]:
         try:
             res = fn(seen)
