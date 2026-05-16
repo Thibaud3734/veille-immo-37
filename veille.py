@@ -399,7 +399,8 @@ async def _scrape_equimmox_async(seen: dict) -> list:
             await page.wait_for_url("https://app.equimmox.com/**", timeout=20000)
 
             await page.goto(EQUIMMOX_SEARCH, timeout=30000)
-            await page.wait_for_selector(".bubble-element.group-item", timeout=25000)
+            await page.wait_for_load_state("networkidle", timeout=30000)
+            await page.wait_for_timeout(4000)  # Bubble.io SPA : attendre le rendu
 
             # Scroll pour charger toutes les annonces
             for _ in range(6):
