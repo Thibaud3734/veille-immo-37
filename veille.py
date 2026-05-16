@@ -615,10 +615,13 @@ def main():
     Path(f"veille_{TODAY}.md").write_text(report, encoding="utf-8")
     log.info(f"Rapport sauvegardé : veille_{TODAY}.md")
 
-    send_email(
-        f"Veille Immo 37 — {TODAY} — {len(all_listings)} nouvelles annonces",
-        report,
-    )
+    if all_listings or inaccessible:
+        send_email(
+            f"Veille Immo 37 — {TODAY} — {len(all_listings)} nouvelles annonces",
+            report,
+        )
+    else:
+        log.info("Aucune nouvelle annonce — email non envoyé (Mac a probablement déjà traité)")
     log.info(f"=== Fin : {len(all_listings)} nouvelles annonces ===")
 
 
