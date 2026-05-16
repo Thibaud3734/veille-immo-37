@@ -340,31 +340,35 @@ async def _scrape_leboncoin_async(seen: dict) -> list:
         )
         await context.add_init_script(LBC_STEALTH_JS)
         page = await context.new_page()
+        captured_ads: list = []
+
+        async def intercept(response):
+            if ("api.leboncoin.fr" in response.url or "lstg/search" in response.url
+                    or "/find" in response.url) and response.status == 200:
+                try:
+                    body = await response.json()
+                    if isinstance(body, dict) and "ads" in body:
+                        captured_ads.extend(body["ads"])
+                        log.info(f"LeBonCoin API interceptée : {len(body['ads'])} annonces")
+                except Exception:
+                    pass
+
+        page.on("response", intercept)
         try:
             await page.goto(
                 "https://www.leboncoin.fr/recherche?category=8&locations=Indre-et-Loire_37",
                 timeout=30000,
                 wait_until="networkidle",
             )
-            await page.wait_for_timeout(3000)
-            log.info(f"LeBonCoin : URL={page.url} | titre={await page.title()}")
+            await page.wait_for_timeout(4000)
+            log.info(f"LeBonCoin : {len(captured_ads)} annonces interceptées")
 
-            next_data = await page.evaluate(
-                "() => { const el = document.getElementById('__NEXT_DATA__'); "
-                "return el ? el.textContent : null; }"
-            )
-            if not next_data:
-                log.warning("LeBonCoin : NEXT_DATA absent")
-                return results
-
-            data = json.loads(next_data)
-            ads = (data.get("props", {})
-                       .get("pageProps", {})
-                       .get("searchData", {})
-                       .get("ads", []))
-            ads_37 = [a for a in ads
+            ads_37 = [a for a in captured_ads
                       if a.get("location", {}).get("department_id") == DEPT]
-            log.info(f"LeBonCoin : {len(ads)} annonces nationales, {len(ads_37)} en dept 37")
+            if not captured_ads:
+                log.warning("LeBonCoin : aucune réponse API interceptée")
+                return results
+            log.info(f"LeBonCoin : {len(captured_ads)} annonces totales, {len(ads_37)} en dept 37")
 
             for ad in ads_37:
                 url = ad.get("url", "")
