@@ -5,6 +5,7 @@ Version cloud : email via SMTP Office 365
 """
 
 import asyncio
+import html as _html
 import json
 import logging
 import os
@@ -145,6 +146,18 @@ def abs_url(href: str, base: str) -> str:
     return href if href.startswith("http") else base + href
 
 
+def _first_photo(soup, base: str) -> str:
+    skip = re.compile(r"logo|icon|avatar|banner|sprite|pixel|blank|\.svg", re.I)
+    for img in soup.find_all("img"):
+        src = img.get("src", "") or img.get("data-src", "")
+        if not src or skip.search(src):
+            continue
+        if src.startswith("data:"):
+            continue
+        return abs_url(src, base)
+    return ""
+
+
 # ── Déduplication inter-sources ───────────────────────────────────────────────
 
 CITY_ALIASES = {
@@ -241,6 +254,11 @@ def scrape_geolocaux_page(url: str, label: str, seen: dict) -> list:
             r"(Tours|Amboise|Chinon|Joué|Saint-Cyr|Saint-Pierre|"
             r"Chambray|La Riche|Fondettes|Ballan|Sorigny)", titre, re.I
         )
+        photo = ""
+        style_attr = card.get("style", "")
+        pm = re.search(r"url\(['\"]?(/[^)'\"]+)['\"]?\)", style_attr)
+        if pm:
+            photo = GEOLOCAUX_BASE + pm.group(1)
         listing = {
             "source": "Geolocaux",
             "type": label,
@@ -250,7 +268,7 @@ def scrape_geolocaux_page(url: str, label: str, seen: dict) -> list:
             "prix": clean(prix_el),
             "agence": clean(pub_el),
             "description": clean(desc_el)[:400],
-            "url": url_annonce,
+            "url": url_annonce, "photo": photo,
             "reference": ref_m.group(1) if ref_m else "",
             "date": "",
         }
@@ -310,6 +328,7 @@ def scrape_arthur_loyd(seen: dict) -> list:
             meta = fsoup.find("meta", {"name": "description"})
             parts = link.split("/")
             ville = parts[-2].replace("-", " ").title() if len(parts) >= 2 else DEPT_NAME
+            photo = _first_photo(fsoup, ARTHUR_LOYD_BASE)
             listing = {
                 "source": "Arthur Loyd",
                 "type": label,
@@ -319,7 +338,7 @@ def scrape_arthur_loyd(seen: dict) -> list:
                 "prix": prix_m.group(0).strip() if prix_m else "N/A",
                 "agence": "Arthur Loyd",
                 "description": meta["content"][:400] if meta and meta.get("content") else "N/A",
-                "url": link,
+                "url": link, "photo": photo,
                 "reference": re.search(r"ref(\d+)", link, re.I).group(1)
                              if re.search(r"ref(\d+)", link, re.I) else "",
                 "date": "",
@@ -367,6 +386,7 @@ def scrape_weadvisor(seen: dict) -> list:
                 surf_m = re.search(r"(\d[\d\s]*)\s*m²", rf.text)
                 prix_m = re.search(r"([\d\s]{4,})\s*€", rf.text)
                 city_name = city_href.split("/")[-1].replace("-", " ").title()
+                photo = _first_photo(fsoup, WEADVISOR_BASE)
                 listing = {
                     "source": "Weadvisor",
                     "type": label,
@@ -376,7 +396,7 @@ def scrape_weadvisor(seen: dict) -> list:
                     "prix": prix_m.group(0).strip() if prix_m else "N/A",
                     "agence": "Weadvisor",
                     "description": "N/A",
-                    "url": link,
+                    "url": link, "photo": photo,
                     "reference": "",
                     "date": "",
                 }
@@ -576,7 +596,7 @@ async def _scrape_equimmox_async(seen: dict) -> list:
                     "prix": prix,
                     "agence": "Equimmox",
                     "description": f"{prix_m2} | Publié le {date_pub}",
-                    "url": EQUIMMOX_SEARCH,
+                    "url": EQUIMMOX_SEARCH, "photo": "",
                     "reference": "",
                     "date": date_pub,
                 }
@@ -596,69 +616,145 @@ def scrape_equimmox(seen: dict) -> list:
     return asyncio.run(_scrape_equimmox_async(seen))
 
 
-# ── Rapport ───────────────────────────────────────────────────────────────────
+# ── Rapport HTML ──────────────────────────────────────────────────────────────
 
-def build_report(all_listings: list, inaccessible: list) -> str:
-    by_source = {}
-    type_counts = {}
+SOURCE_COLORS = {
+    "Geolocaux":   "#2d7a3a",
+    "Arthur Loyd": "#b35a00",
+    "Weadvisor":   "#5c3d9e",
+    "LeBonCoin":   "#c0392b",
+    "Equimmox":    "#0a6eb4",
+}
+
+def _card_html(l: dict) -> str:
+    e = _html.escape
+    color = SOURCE_COLORS.get(l["source"].split(" + ")[0], "#555")
+    photo = l.get("photo", "")
+    if photo:
+        photo_td = (
+            f'<td width="200" valign="top" style="padding:0;min-width:200px;">'
+            f'<img src="{e(photo)}" width="200" height="145" '
+            f'style="display:block;object-fit:cover;width:200px;height:145px;" alt="photo"></td>'
+        )
+    else:
+        photo_td = (
+            f'<td width="200" valign="top" style="padding:0;min-width:200px;">'
+            f'<div style="width:200px;height:145px;background:#e8edf2;display:table-cell;'
+            f'vertical-align:middle;text-align:center;color:#aaa;font-size:12px;font-family:Arial;">'
+            f'Pas de photo</div></td>'
+        )
+    transaction = "Vente" if "Vente" in l["type"] else "Location"
+    trans_color = "#b35a00" if transaction == "Vente" else "#0a6eb4"
+    desc = e(l.get("description", "N/A") or "N/A")
+    desc_row = f'<tr><td colspan="2" style="padding:6px 0 0;font-size:12px;color:#666;">{desc[:200]}</td></tr>' if desc and desc != "N/A" else ""
+    return f'''
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;margin-bottom:14px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,0.10);">
+<tr>
+  {photo_td}
+  <td valign="top" style="padding:14px 16px;">
+    <table cellpadding="0" cellspacing="0" width="100%"><tr>
+      <td><span style="background:{color};color:#fff;padding:2px 9px;border-radius:10px;font-size:11px;font-family:Arial;font-weight:bold;">{e(l["source"])}</span>&nbsp;
+      <span style="background:{trans_color};color:#fff;padding:2px 9px;border-radius:10px;font-size:11px;font-family:Arial;">{e(transaction)}</span></td>
+      <td align="right" style="font-size:11px;color:#999;font-family:Arial;">{e(l.get("date","") or "")}</td>
+    </tr></table>
+    <div style="font-size:15px;font-weight:bold;color:#1a1a1a;font-family:Arial;margin:8px 0 6px;line-height:1.3;">{e(l["titre"])}</div>
+    <table cellpadding="3" cellspacing="0" style="font-size:13px;font-family:Arial;color:#444;width:100%;">
+      <tr><td style="color:#888;white-space:nowrap;padding-right:10px;">Localisation</td><td><b>{e(l["localisation"])}</b></td></tr>
+      <tr><td style="color:#888;white-space:nowrap;">Surface</td><td>{e(l["surface"])}</td></tr>
+      <tr><td style="color:#888;white-space:nowrap;">Prix / Loyer</td><td><b style="color:#1e3a5f;">{e(l["prix"])}</b></td></tr>
+      <tr><td style="color:#888;white-space:nowrap;">Agence</td><td>{e(l["agence"])}</td></tr>
+      {desc_row}
+    </table>
+    <a href="{e(l['url'])}" style="display:inline-block;background:#1e3a5f;color:#ffffff;padding:7px 16px;border-radius:4px;text-decoration:none;font-size:13px;font-family:Arial;margin-top:10px;">Voir l&apos;annonce &rarr;</a>
+  </td>
+</tr>
+</table>'''
+
+
+def build_html_report(all_listings: list, inaccessible: list) -> str:
+    e = _html.escape
+    by_source: dict = {}
+    type_counts: dict = {}
     for l in all_listings:
         by_source.setdefault(l["source"], []).append(l)
-        short_type = l["type"].split(" — ")[0]
-        type_counts[short_type] = type_counts.get(short_type, 0) + 1
+        t = l["type"].split(" — ")[0]
+        type_counts[t] = type_counts.get(t, 0) + 1
 
-    lines = [
-        f"# Veille Immobilière Commerciale — {DEPT_NAME} ({DEPT})",
-        f"## {TODAY}",
-        "",
-        "---",
-        "",
-        "## Résumé",
-        f"- **Nouvelles annonces :** {len(all_listings)}",
-    ]
-    for t, n in sorted(type_counts.items()):
-        lines.append(f"  - {t} : {n}")
-    if by_source:
-        lines.append(f"- **Sources actives :** {', '.join(by_source.keys())}")
-    if inaccessible:
-        lines.append(f"- **Erreurs :** {', '.join(inaccessible)}")
-    lines += ["", "---", ""]
+    summary_rows = "".join(
+        f'<tr><td style="padding:3px 12px 3px 0;color:#ccd;">{e(t)}</td>'
+        f'<td style="padding:3px 0;font-weight:bold;">{n}</td></tr>'
+        for t, n in sorted(type_counts.items())
+    )
+    err_banner = (
+        f'<div style="background:#fdecea;border-left:4px solid #c0392b;padding:10px 16px;'
+        f'margin-bottom:16px;border-radius:4px;font-family:Arial;font-size:13px;color:#922;">'
+        f'Erreurs : {e(", ".join(inaccessible))}</div>'
+    ) if inaccessible else ""
+
+    body_parts = []
+    for source, listings in sorted(by_source.items()):
+        color = SOURCE_COLORS.get(source.split(" + ")[0], "#555")
+        body_parts.append(
+            f'<div style="font-size:16px;font-weight:bold;color:#fff;background:{color};'
+            f'padding:8px 16px;border-radius:6px;margin:20px 0 10px;font-family:Arial;">'
+            f'{e(source)} &mdash; {len(listings)} annonce(s)</div>'
+        )
+        for l in listings:
+            body_parts.append(_card_html(l))
 
     if not all_listings:
-        lines.append("_Aucune nouvelle annonce détectée aujourd'hui._")
-    else:
-        for source, listings in sorted(by_source.items()):
-            lines += [f"## {source}  ({len(listings)} nouvelle(s))", ""]
-            for l in listings:
-                lines += [
-                    f"### {l['type']} — {l['localisation']}",
-                    f"**{l['titre']}**",
-                    "",
-                    f"| Champ | Valeur |",
-                    f"|-------|--------|",
-                    f"| Surface | {l['surface']} |",
-                    f"| Prix / Loyer | {l['prix']} |",
-                    f"| Agence | {l['agence']} |",
-                    f"| Référence | {l['reference'] or 'N/A'} |",
-                    f"| Date publication | {l['date'] or 'N/A'} |",
-                    "",
-                    f"**Description :** {l['description']}",
-                    "",
-                    f"Lien : {l['url']}",
-                    "",
-                    "---",
-                    "",
-                ]
+        body_parts.append('<p style="font-family:Arial;color:#666;font-style:italic;">Aucune nouvelle annonce aujourd\'hui.</p>')
+
+    return f"""<!DOCTYPE html>
+<html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f0f2f5;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#1e3a5f;">
+<tr><td align="center" style="padding:28px 20px;">
+  <div style="font-size:22px;font-weight:bold;color:#ffffff;font-family:Arial;">Veille Immobilière Commerciale</div>
+  <div style="font-size:14px;color:#aac4e8;font-family:Arial;margin-top:6px;">Indre-et-Loire (37) &bull; {e(TODAY)} &bull; {len(all_listings)} nouvelle(s) annonce(s)</div>
+</td></tr>
+</table>
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f7f9fc;border-bottom:1px solid #dde;">
+<tr><td style="padding:16px 24px;">
+  <table cellpadding="0" cellspacing="0" style="font-size:13px;font-family:Arial;color:#1e3a5f;">{summary_rows}</table>
+</td></tr>
+</table>
+<div style="max-width:680px;margin:0 auto;padding:20px 16px;">
+  {err_banner}
+  {"".join(body_parts)}
+</div>
+</body></html>"""
+
+
+def build_report(all_listings: list, inaccessible: list) -> str:
+    """Version Markdown pour le fichier .md sauvegardé dans le dépôt."""
+    by_source: dict = {}
+    for l in all_listings:
+        by_source.setdefault(l["source"], []).append(l)
+    lines = [f"# Veille {TODAY} — {len(all_listings)} annonces", ""]
+    for source, listings in sorted(by_source.items()):
+        lines.append(f"## {source} ({len(listings)})")
+        for l in listings:
+            lines += [
+                f"### {l['type']} — {l['localisation']}",
+                f"**{l['titre']}**  ",
+                f"Surface : {l['surface']} | Prix : {l['prix']} | Agence : {l['agence']}  ",
+                f"URL : {l['url']}", "",
+            ]
     return "\n".join(lines)
 
 
 # ── Email SMTP Office 365 ─────────────────────────────────────────────────────
 
-def send_email(subject: str, body: str):
+def send_email(subject: str, html_body: str):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = SMTP_USER
     msg["To"]      = EMAIL_TO
-    msg.attach(MIMEText(body, "plain", "utf-8"))
+    plain = re.sub(r"<[^>]+>", " ", html_body)
+    plain = re.sub(r"\s+", " ", plain).strip()
+    msg.attach(MIMEText(plain, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
     try:
         with smtplib.SMTP("smtp.office365.com", 587, timeout=30) as server:
             server.ehlo()
@@ -695,14 +791,15 @@ def main():
     save_seen(seen)
 
     all_listings = deduplicate(all_listings)
-    report = build_report(all_listings, inaccessible)
-    Path(f"veille_{TODAY}.md").write_text(report, encoding="utf-8")
+    Path(f"veille_{TODAY}.md").write_text(
+        build_report(all_listings, inaccessible), encoding="utf-8"
+    )
     log.info(f"Rapport sauvegardé : veille_{TODAY}.md")
 
     if all_listings or inaccessible:
         send_email(
             f"Veille Immo 37 — {TODAY} — {len(all_listings)} nouvelles annonces",
-            report,
+            build_html_report(all_listings, inaccessible),
         )
     else:
         log.info("Aucune nouvelle annonce — email non envoyé (Mac a probablement déjà traité)")
