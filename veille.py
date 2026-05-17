@@ -81,9 +81,12 @@ GEOLOCAUX_TYPES = [
 
 ARTHUR_LOYD_SLUGS = ["bureau-location", "terrain-location"]
 
-GEOLOCAUX_BASE   = "https://www.geolocaux.com"
-ARTHUR_LOYD_BASE = "https://www.arthur-loyd.com"
-WEADVISOR_BASE   = "https://www.weadvisor.fr"
+GEOLOCAUX_BASE      = "https://www.geolocaux.com"
+ARTHUR_LOYD_BASE    = "https://www.arthur-loyd.com"
+WEADVISOR_BASE      = "https://www.weadvisor.fr"
+IMVALORIS_BASE      = "https://www.imvaloris.fr"
+IMVALORIS_LIST      = "https://www.imvaloris.fr/consultez-nos-biens-immobiliers/"
+IMVALORIS_KEYWORDS  = re.compile(r"local|bureau|commerce|activit|entrepôt|professionnel", re.I)
 EQUIMMOX_LOGIN   = "https://app.equimmox.com/connexion"
 EQUIMMOX_SEARCH  = (
     "https://app.equimmox.com/?pmn=&pmx=&cl=Office_Commercial&smn=&smx=&slt=1"
@@ -535,6 +538,59 @@ async def _scrape_leboncoin_async(seen: dict) -> list:
     return results
 
 
+# ── Scraper Im Valoris ────────────────────────────────────────────────────────
+
+def scrape_imvaloris(seen: dict) -> list:
+    results = []
+    r = fetch(IMVALORIS_LIST)
+    if not r:
+        log.warning("Im Valoris : page inaccessible")
+        return results
+    soup = BeautifulSoup(r.text, "html.parser")
+    cards = [c for c in soup.select("[class*=annonce]")
+             if c.find("a", href=True) and IMVALORIS_KEYWORDS.search(c.get_text())]
+    log.info(f"Im Valoris : {len(cards)} annonces commerciales trouvées")
+    for card in cards:
+        link_tag = card.find("a", href=True)
+        url = abs_url(link_tag["href"], IMVALORIS_BASE)
+        ref_m = re.search(r"ref=([^&]+)", url)
+        ref = ref_m.group(1) if ref_m else ""
+        uid = f"imvaloris_{ref}" if ref else url
+        if not is_new(uid, seen):
+            continue
+        rf = fetch(url)
+        mark_seen(uid, seen)
+        if not rf:
+            continue
+        fsoup = BeautifulSoup(rf.text, "html.parser")
+        h1 = fsoup.find("h1")
+        surf_m = re.search(r"(\d[\d\s,\.]*)\s*m²", rf.text)
+        prix_m = re.search(r"([\d\s]{3,})\s*€", rf.text)
+        txt = card.get_text(separator=" ", strip=True)
+        type_bien = "Local commercial — Location"
+        if "vente" in txt.lower() or "achat" in txt.lower():
+            type_bien = "Local commercial — Vente"
+        elif "bureau" in txt.lower():
+            type_bien = "Bureau — Location"
+        photo = _first_photo(fsoup, IMVALORIS_BASE)
+        listing = {
+            "source": "Im Valoris",
+            "type": type_bien,
+            "titre": clean(h1) if h1 else txt[:80],
+            "localisation": "Tours",
+            "surface": surf_m.group(0).strip() if surf_m else "N/A",
+            "prix": prix_m.group(0).strip() if prix_m else "N/A",
+            "agence": "Im Valoris",
+            "description": txt[:400],
+            "url": url, "photo": photo,
+            "reference": ref, "date": "",
+        }
+        results.append(listing)
+        time.sleep(1.5)
+    log.info(f"Im Valoris : {len(results)} nouvelles annonces")
+    return results
+
+
 def scrape_leboncoin(seen: dict) -> list:
     return asyncio.run(_scrape_leboncoin_async(seen))
 
@@ -624,6 +680,7 @@ SOURCE_COLORS = {
     "Weadvisor":   "#5c3d9e",
     "LeBonCoin":   "#c0392b",
     "Equimmox":    "#0a6eb4",
+    "Im Valoris":  "#7a3a6e",
 }
 
 def _card_html(l: dict) -> str:
@@ -778,6 +835,7 @@ def main():
         ("Geolocaux",   scrape_geolocaux),
         ("Arthur Loyd", scrape_arthur_loyd),
         ("Weadvisor",   scrape_weadvisor),
+        ("Im Valoris",  scrape_imvaloris),
         ("LeBonCoin",   scrape_leboncoin),
         ("Equimmox",    scrape_equimmox),
     ]:
