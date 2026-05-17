@@ -169,6 +169,13 @@ def _norm_surface(raw: str) -> Optional[int]:
             return None
     return None
 
+def _norm_price(raw: str) -> Optional[int]:
+    nums = re.findall(r"\d+", raw.replace("\xa0", "").replace(" ", ""))
+    for n in nums:
+        if int(n) >= 100:
+            return int(n)
+    return None
+
 def _norm_type(raw: str) -> str:
     t = raw.lower().split(" — ")[0]
     if "bureau" in t:       return "bureau"
@@ -186,11 +193,11 @@ def deduplicate(listings: list) -> list:
         surf = _norm_surface(l.get("surface", ""))
         city = _norm_city(l.get("localisation", ""))
         typ  = _norm_type(l.get("type", ""))
+        prix = _norm_price(l.get("prix", ""))
         if not surf or not city:
             extras.append(l)
             continue
-        surf_bucket = round(surf / 10) * 10
-        fp = f"{typ}_{city}_{surf_bucket}"
+        fp = f"{typ}_{city}_{surf}_{prix if prix else 'na'}"
         if fp in buckets:
             existing = buckets[fp]
             if l["source"] not in existing["source"]:
