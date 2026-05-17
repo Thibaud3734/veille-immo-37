@@ -145,6 +145,68 @@ def abs_url(href: str, base: str) -> str:
     return href if href.startswith("http") else base + href
 
 
+# ── Déduplication inter-sources ───────────────────────────────────────────────
+
+CITY_ALIASES = {
+    "saint pierre des corps": "saint-pierre-des-corps",
+    "saint cyr sur loire":    "saint-cyr-sur-loire",
+    "chambray les tours":     "chambray-les-tours",
+    "joue les tours":         "joue-les-tours",
+    "la riche":               "la-riche",
+}
+
+def _norm_city(raw: str) -> str:
+    s = re.sub(r"[^a-z\s-]", "", raw.lower().strip())
+    s = re.sub(r"\s+", " ", s).split(" — ")[0].split(",")[0].strip()
+    return CITY_ALIASES.get(s, s.split()[0] if s else "")
+
+def _norm_surface(raw: str) -> Optional[int]:
+    m = re.search(r"(\d[\d\s]*)", raw.replace("\xa0", "").replace(",", "."))
+    if m:
+        try:
+            return int(float(m.group(1).replace(" ", "")))
+        except ValueError:
+            return None
+    return None
+
+def _norm_type(raw: str) -> str:
+    t = raw.lower().split(" — ")[0]
+    if "bureau" in t:       return "bureau"
+    if "activit" in t or "entrepot" in t or "entrepôt" in t: return "activite"
+    if "local" in t or "commerce" in t: return "local"
+    if "terrain" in t:      return "terrain"
+    return t[:10]
+
+def deduplicate(listings: list) -> list:
+    buckets: dict[str, dict] = {}
+    order: list[str] = []
+    extras: list[dict] = []
+
+    for l in listings:
+        surf = _norm_surface(l.get("surface", ""))
+        city = _norm_city(l.get("localisation", ""))
+        typ  = _norm_type(l.get("type", ""))
+        if not surf or not city:
+            extras.append(l)
+            continue
+        surf_bucket = round(surf / 10) * 10
+        fp = f"{typ}_{city}_{surf_bucket}"
+        if fp in buckets:
+            existing = buckets[fp]
+            if l["source"] not in existing["source"]:
+                existing["source"] += f" + {l['source']}"
+            log.info(f"Doublon inter-sources: {fp} → {existing['source']}")
+        else:
+            buckets[fp] = l
+            order.append(fp)
+
+    deduped = [buckets[fp] for fp in order] + extras
+    removed = len(listings) - len(deduped)
+    if removed:
+        log.info(f"Déduplication : {removed} doublon(s) supprimé(s)")
+    return deduped
+
+
 # ── Scrapers ──────────────────────────────────────────────────────────────────
 
 def scrape_geolocaux_page(url: str, label: str, seen: dict) -> list:
@@ -625,6 +687,7 @@ def main():
 
     save_seen(seen)
 
+    all_listings = deduplicate(all_listings)
     report = build_report(all_listings, inaccessible)
     Path(f"veille_{TODAY}.md").write_text(report, encoding="utf-8")
     log.info(f"Rapport sauvegardé : veille_{TODAY}.md")
