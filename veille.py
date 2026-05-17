@@ -91,8 +91,12 @@ EQUIMMOX_SEARCH  = (
 )
 
 WEADVISOR_SEARCHES = [
-    ("/locaux-commerciaux-location/indre-et-loire", "Local commercial — Location"),
-    ("/bureaux-location/indre-et-loire",            "Bureau — Location"),
+    ("/bureaux-location/indre-et-loire",                    "Bureau — Location"),
+    ("/locaux-commerciaux-location/indre-et-loire",         "Local commercial — Location"),
+    ("/locaux-activite-entrepots-location/indre-et-loire",  "Local d'activité — Location"),
+    ("/bureaux-vente/indre-et-loire",                       "Bureau — Vente"),
+    ("/locaux-commerciaux-vente/indre-et-loire",            "Local commercial — Vente"),
+    ("/locaux-activite-entrepots-vente/indre-et-loire",     "Local d'activité — Vente"),
 ]
 
 
