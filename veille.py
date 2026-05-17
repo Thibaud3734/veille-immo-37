@@ -43,7 +43,7 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "fr-FR,fr;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",
 }
 
 SESSION = requests.Session()
@@ -59,25 +59,23 @@ log = logging.getLogger(__name__)
 
 # ── Villes du 37 ──────────────────────────────────────────────────────────────
 CITIES_37 = [
-    "tours-37000",
-    "joue-les-tours-37300",
-    "saint-pierre-des-corps-37700",
-    "saint-cyr-sur-loire-37540",
-    "chambray-les-tours-37170",
-    "la-riche-37520",
-    "fondettes-37230",
+    "tours-37000", "joue-les-tours-37300", "saint-pierre-des-corps-37700",
+    "saint-cyr-sur-loire-37540", "chambray-les-tours-37170",
+]
+
+CITIES_37_VENTE = [
+    "tours-37000", "joue-les-tours-37300", "saint-pierre-des-corps-37700",
+    "saint-cyr-sur-loire-37540", "chambray-les-tours-37170",
     "ballan-mire-37510",
-    "amboise-37400",
-    "chinon-37500",
 ]
 
 GEOLOCAUX_TYPES = [
-    ("location", "bureau",           "Bureau — Location"),
-    ("location", "local-commercial", "Local commercial — Location"),
-    ("location", "entrepot",         "Local d'activité — Location"),
-    ("vente",    "bureau",           "Bureau — Vente"),
-    ("vente",    "local-commercial", "Local commercial — Vente"),
-    ("vente",    "entrepot",         "Local d'activité — Vente"),
+    ("location", "bureau",           "Bureau — Location",           CITIES_37),
+    ("location", "local-commercial", "Local commercial — Location", CITIES_37),
+    ("location", "entrepot",         "Local d'activité — Location", CITIES_37),
+    ("vente",    "bureau",           "Bureau — Vente",              CITIES_37_VENTE),
+    ("vente",    "local-commercial", "Local commercial — Vente",    CITIES_37_VENTE),
+    ("vente",    "entrepot",         "Local d'activité — Vente",    CITIES_37_VENTE),
 ]
 
 ARTHUR_LOYD_SLUGS = ["bureau-location", "terrain-location"]
@@ -190,8 +188,8 @@ def scrape_geolocaux_page(url: str, label: str, seen: dict) -> list:
 
 def scrape_geolocaux(seen: dict) -> list:
     results = []
-    for transaction, type_bien, label in GEOLOCAUX_TYPES:
-        for city in CITIES_37:
+    for transaction, type_bien, label, cities in GEOLOCAUX_TYPES:
+        for city in cities:
             url = f"{GEOLOCAUX_BASE}/{transaction}/{type_bien}/{city}/"
             page_results = scrape_geolocaux_page(url, label, seen)
             results.extend(page_results)
