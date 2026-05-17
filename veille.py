@@ -260,44 +260,56 @@ def scrape_arthur_loyd(seen: dict) -> list:
 
 def scrape_weadvisor(seen: dict) -> list:
     results = []
-    for path, label in WEADVISOR_SEARCHES:
-        r = fetch(WEADVISOR_BASE + path)
+    for dept_path, label in WEADVISOR_SEARCHES:
+        type_prefix = dept_path.split("/")[1]  # ex: "bureaux-location"
+        r = fetch(WEADVISOR_BASE + dept_path)
         if not r:
             continue
         soup = BeautifulSoup(r.text, "html.parser")
-        offer_links = list(dict.fromkeys(
-            abs_url(a["href"], WEADVISOR_BASE)
-            for a in soup.find_all("a", href=True)
-            if any(x in a["href"] for x in ["/annonce/", "/offre/", "/bien/"])
-            and len(a["href"]) > 10
+        city_links = list(dict.fromkeys(
+            a["href"] for a in soup.find_all("a", href=True)
+            if a["href"].startswith(dept_path + "/")
         ))
-        for link in offer_links[:20]:
-            if not is_new(link, seen):
+        for city_href in city_links:
+            city_r = fetch(WEADVISOR_BASE + city_href)
+            if not city_r:
+                time.sleep(1)
                 continue
-            rf = fetch(link)
-            mark_seen(link, seen)
-            if not rf:
-                continue
-            fsoup = BeautifulSoup(rf.text, "html.parser")
-            h1 = fsoup.find("h1")
-            surf_m = re.search(r"(\d[\d\s]*)\s*m²", rf.text)
-            prix_m = re.search(r"([\d\s]{3,})\s*€", rf.text)
-            meta = fsoup.find("meta", {"name": "description"})
-            listing = {
-                "source": "Weadvisor",
-                "type": label,
-                "titre": clean(h1) if h1 else "N/A",
-                "localisation": DEPT_NAME,
-                "surface": surf_m.group(0).strip() if surf_m else "N/A",
-                "prix": prix_m.group(0).strip() if prix_m else "N/A",
-                "agence": "Weadvisor",
-                "description": meta["content"][:400] if meta and meta.get("content") else "N/A",
-                "url": link,
-                "reference": "",
-                "date": "",
-            }
-            results.append(listing)
-            time.sleep(1.5)
+            city_soup = BeautifulSoup(city_r.text, "html.parser")
+            annonce_links = list(dict.fromkeys(
+                abs_url(a["href"], WEADVISOR_BASE)
+                for a in city_soup.find_all("a", href=True)
+                if re.match(rf"^/{re.escape(type_prefix)}/[^/]+/[^/]+", a["href"])
+                and "indre-et-loire" not in a["href"]
+            ))
+            for link in annonce_links:
+                if not is_new(link, seen):
+                    continue
+                rf = fetch(link)
+                mark_seen(link, seen)
+                if not rf:
+                    continue
+                fsoup = BeautifulSoup(rf.text, "html.parser")
+                h1 = fsoup.find("h1")
+                surf_m = re.search(r"(\d[\d\s]*)\s*m²", rf.text)
+                prix_m = re.search(r"([\d\s]{4,})\s*€", rf.text)
+                city_name = city_href.split("/")[-1].replace("-", " ").title()
+                listing = {
+                    "source": "Weadvisor",
+                    "type": label,
+                    "titre": clean(h1) if h1 else "N/A",
+                    "localisation": city_name,
+                    "surface": surf_m.group(0).strip() if surf_m else "N/A",
+                    "prix": prix_m.group(0).strip() if prix_m else "N/A",
+                    "agence": "Weadvisor",
+                    "description": "N/A",
+                    "url": link,
+                    "reference": "",
+                    "date": "",
+                }
+                results.append(listing)
+                time.sleep(1.5)
+            time.sleep(1)
         time.sleep(2)
     log.info(f"Weadvisor: {len(results)} nouvelles annonces")
     return results
