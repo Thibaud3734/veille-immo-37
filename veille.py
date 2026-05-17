@@ -150,14 +150,12 @@ def abs_url(href: str, base: str) -> str:
 
 
 def _first_photo(soup, base: str) -> str:
-    skip = re.compile(r"logo|icon|avatar|banner|sprite|pixel|blank|\.svg", re.I)
+    skip = re.compile(r"logo|icon|avatar|banner|sprite|pixel|blank|placeholder|\.svg", re.I)
     for img in soup.find_all("img"):
-        src = img.get("src", "") or img.get("data-src", "")
-        if not src or skip.search(src):
-            continue
-        if src.startswith("data:"):
-            continue
-        return abs_url(src, base)
+        for attr in ("src", "data-src", "data-lazy", "data-lazy-src", "data-original"):
+            src = img.get(attr, "")
+            if src and not skip.search(src) and not src.startswith("data:"):
+                return abs_url(src, base)
     return ""
 
 
@@ -258,10 +256,15 @@ def scrape_geolocaux_page(url: str, label: str, seen: dict) -> list:
             r"Chambray|La Riche|Fondettes|Ballan|Sorigny)", titre, re.I
         )
         photo = ""
-        style_attr = card.get("style", "")
-        pm = re.search(r"url\(['\"]?(/[^)'\"]+)['\"]?\)", style_attr)
-        if pm:
-            photo = GEOLOCAUX_BASE + pm.group(1)
+        for el in [card] + card.find_all(True, style=True):
+            pm = re.search(r"url\(['\"]?([^)'\"]+)['\"]?\)", el.get("style", ""))
+            if pm:
+                src = pm.group(1)
+                if not src.startswith("data:"):
+                    photo = abs_url(src, GEOLOCAUX_BASE)
+                    break
+        if not photo:
+            photo = _first_photo(card, GEOLOCAUX_BASE)
         listing = {
             "source": "Geolocaux",
             "type": label,
@@ -513,6 +516,10 @@ async def _scrape_leboncoin_async(seen: dict) -> list:
                          for a in ad.get("attributes", []) if "key" in a}
                 prix_raw = ad.get("price", [None])[0] if ad.get("price") else None
                 cat_id = str(ad.get("category_id", "8"))
+                imgs = ad.get("images", {})
+                photo = (imgs.get("thumb_url") or
+                         next(iter(imgs.get("urls_thumb", [])), "") or
+                         next(iter(imgs.get("urls", [])), "") or "")
                 listing = {
                     "source": "LeBonCoin",
                     "type": LBC_CAT_LABELS.get(cat_id, "Bureau / Local commercial"),
@@ -522,7 +529,7 @@ async def _scrape_leboncoin_async(seen: dict) -> list:
                     "prix": f"{prix_raw:,} €".replace(",", " ") if prix_raw else "N/A",
                     "agence": ad.get("owner", {}).get("name", "Particulier"),
                     "description": (ad.get("body") or "")[:400],
-                    "url": url,
+                    "url": url, "photo": photo,
                     "reference": str(ad.get("list_id", "")),
                     "date": (ad.get("first_publication_date") or "")[:10],
                 }
@@ -683,6 +690,36 @@ SOURCE_COLORS = {
     "Im Valoris":  "#7a3a6e",
 }
 
+TYPE_ORDER = [
+    "Local commercial — Location",
+    "Local commercial — Vente",
+    "Bureau — Location",
+    "Bureau — Vente",
+    "Local d'activité — Location",
+    "Local d'activité — Vente",
+]
+
+TYPE_COLORS = {
+    "Local commercial — Location": "#c0392b",
+    "Local commercial — Vente":    "#7b241c",
+    "Bureau — Location":           "#0a6eb4",
+    "Bureau — Vente":              "#1a5276",
+    "Local d'activité — Location": "#2d7a3a",
+    "Local d'activité — Vente":    "#1e5724",
+}
+
+def _type_bucket(l: dict) -> str:
+    t = l.get("type", "")
+    norm = _norm_type(t)
+    vente = "vente" in t.lower() or "achat" in t.lower()
+    if norm in ("local", "commerce"):
+        return "Local commercial — Vente" if vente else "Local commercial — Location"
+    if norm == "bureau":
+        return "Bureau — Vente" if vente else "Bureau — Location"
+    if norm == "activite":
+        return "Local d'activité — Vente" if vente else "Local d'activité — Location"
+    return "Autres"
+
 def _card_html(l: dict) -> str:
     e = _html.escape
     color = SOURCE_COLORS.get(l["source"].split(" + ")[0], "#555")
@@ -690,14 +727,14 @@ def _card_html(l: dict) -> str:
     if photo:
         photo_td = (
             f'<td width="200" valign="top" style="padding:0;min-width:200px;">'
-            f'<img src="{e(photo)}" width="200" height="145" '
-            f'style="display:block;object-fit:cover;width:200px;height:145px;" alt="photo"></td>'
+            f'<img src="{e(photo)}" width="200" '
+            f'style="display:block;width:200px;height:auto;" alt="photo"></td>'
         )
     else:
         photo_td = (
             f'<td width="200" valign="top" style="padding:0;min-width:200px;">'
-            f'<div style="width:200px;height:145px;background:#e8edf2;display:table-cell;'
-            f'vertical-align:middle;text-align:center;color:#aaa;font-size:12px;font-family:Arial;">'
+            f'<div style="width:200px;height:130px;background:#e8edf2;'
+            f'text-align:center;color:#aaa;font-size:12px;font-family:Arial;padding-top:50px;">'
             f'Pas de photo</div></td>'
         )
     transaction = "Vente" if "Vente" in l["type"] else "Location"
@@ -730,18 +767,23 @@ def _card_html(l: dict) -> str:
 
 def build_html_report(all_listings: list, inaccessible: list) -> str:
     e = _html.escape
-    by_source: dict = {}
-    type_counts: dict = {}
+    by_type: dict = {}
     for l in all_listings:
-        by_source.setdefault(l["source"], []).append(l)
-        t = l["type"].split(" — ")[0]
-        type_counts[t] = type_counts.get(t, 0) + 1
+        by_type.setdefault(_type_bucket(l), []).append(l)
 
-    summary_rows = "".join(
-        f'<tr><td style="padding:3px 12px 3px 0;color:#ccd;">{e(t)}</td>'
-        f'<td style="padding:3px 0;font-weight:bold;">{n}</td></tr>'
-        for t, n in sorted(type_counts.items())
-    )
+    summary_rows = ""
+    for t in TYPE_ORDER:
+        if t in by_type:
+            summary_rows += (
+                f'<tr><td style="padding:3px 12px 3px 0;color:#ccd;">{e(t)}</td>'
+                f'<td style="padding:3px 0;font-weight:bold;">{len(by_type[t])}</td></tr>'
+            )
+    if "Autres" in by_type:
+        summary_rows += (
+            f'<tr><td style="padding:3px 12px 3px 0;color:#ccd;">Autres</td>'
+            f'<td style="padding:3px 0;font-weight:bold;">{len(by_type["Autres"])}</td></tr>'
+        )
+
     err_banner = (
         f'<div style="background:#fdecea;border-left:4px solid #c0392b;padding:10px 16px;'
         f'margin-bottom:16px;border-radius:4px;font-family:Arial;font-size:13px;color:#922;">'
@@ -749,12 +791,17 @@ def build_html_report(all_listings: list, inaccessible: list) -> str:
     ) if inaccessible else ""
 
     body_parts = []
-    for source, listings in sorted(by_source.items()):
-        color = SOURCE_COLORS.get(source.split(" + ")[0], "#555")
+    displayed = [t for t in TYPE_ORDER if t in by_type]
+    if "Autres" in by_type:
+        displayed.append("Autres")
+
+    for type_label in displayed:
+        listings = by_type[type_label]
+        color = TYPE_COLORS.get(type_label, "#555")
         body_parts.append(
             f'<div style="font-size:16px;font-weight:bold;color:#fff;background:{color};'
             f'padding:8px 16px;border-radius:6px;margin:20px 0 10px;font-family:Arial;">'
-            f'{e(source)} &mdash; {len(listings)} annonce(s)</div>'
+            f'{e(type_label)} &mdash; {len(listings)} annonce(s)</div>'
         )
         for l in listings:
             body_parts.append(_card_html(l))
