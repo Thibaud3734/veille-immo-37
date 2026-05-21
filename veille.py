@@ -159,6 +159,77 @@ def _first_photo(soup, base: str) -> str:
     return ""
 
 
+# ── Reclassification du type par analyse du titre ────────────────────────────
+
+_KW_LOCAL = re.compile(
+    r"local\s+comm|fond\s+de\s+commerce|boutique|commerce\b|restaurant|brasserie|"
+    r"magasin|\bbar\b|tabac|coiffure|pharmacie|cave\b|salon\s+de|pressing|épicerie|"
+    r"pizzeria|snack|agence\s+(?:immo|banc|voyages?)\b|galerie\s+(?:comm|march)",
+    re.I
+)
+_KW_BUREAU = re.compile(
+    r"\bbureau\w*\b|open[-\s]space|plateau\s+(?:de\s+)?bureau|coworking", re.I
+)
+_KW_ACTIVITE = re.compile(
+    r"entrep[oô]t|local\s+d.activit|activit[eé]|atelier\b|hangar|stockage|"
+    r"logistique|industriel", re.I
+)
+
+def _reclassify_type(listing: dict) -> dict:
+    """Corrige le type en se basant sur le titre (plus fiable que la catégorie source)."""
+    titre = listing.get("titre", "")
+    orig  = listing.get("type", "")
+    vente = "vente" in orig.lower() or bool(
+        re.search(r"\bvente\b|\bvendre\b|\bcession\b", titre, re.I)
+    )
+    if _KW_LOCAL.search(titre):
+        new = "Local commercial — Vente" if vente else "Local commercial — Location"
+    elif _KW_ACTIVITE.search(titre):
+        new = "Local d'activité — Vente" if vente else "Local d'activité — Location"
+    elif _KW_BUREAU.search(titre) and not _KW_LOCAL.search(titre):
+        new = "Bureau — Vente" if vente else "Bureau — Location"
+    else:
+        return listing
+    if new != orig:
+        log.info(f"Reclassif : '{orig}' → '{new}' | {titre[:60]}")
+        return {**listing, "type": new}
+    return listing
+
+
+# ── Tri géographique par proximité de Tours ───────────────────────────────────
+
+CITY_PROXIMITY: dict[str, int] = {
+    "tours":                   0,
+    "saint-cyr-sur-loire":     1,  "saint cyr sur loire":  1,
+    "la riche":                2,  "la-riche":             2,
+    "saint-pierre-des-corps":  3,  "saint pierre des corps": 3,
+    "saint-avertin":           4,  "saint avertin":        4,
+    "joué-lès-tours":          5,  "joue-les-tours":       5,  "joué les tours": 5,
+    "fondettes":               6,
+    "rochecorbon":             7,
+    "chambray-lès-tours":      8,  "chambray-les-tours":   8,  "chambray les tours": 8,
+    "mettray":                 9,
+    "montlouis-sur-loire":    10,  "montlouis sur loire": 10,
+    "ballan-miré":            11,  "ballan-mire":         11,  "ballan miré": 11,
+    "veigné":                 12,  "veigne":              12,
+    "vouvray":                13,
+    "vernou-sur-brenne":      14,  "vernou sur brenne":   14,
+    "amboise":                15,
+    "sorigny":                16,
+    "chinon":                 17,
+}
+
+def _city_sort_key(localisation: str) -> tuple:
+    loc = re.sub(r"\b\d{5}\b", "", localisation.lower()).strip()
+    loc = re.sub(r"\s+", " ", loc)
+    if loc in CITY_PROXIMITY:
+        return (CITY_PROXIMITY[loc], loc)
+    for city, order in CITY_PROXIMITY.items():
+        if loc.startswith(city) or city in loc:
+            return (order, loc)
+    return (999, loc)
+
+
 # ── Déduplication inter-sources ───────────────────────────────────────────────
 
 CITY_ALIASES = {
@@ -796,7 +867,8 @@ def build_html_report(all_listings: list, inaccessible: list) -> str:
         displayed.append("Autres")
 
     for type_label in displayed:
-        listings = by_type[type_label]
+        listings = sorted(by_type[type_label],
+                          key=lambda l: _city_sort_key(l.get("localisation", "")))
         color = TYPE_COLORS.get(type_label, "#555")
         body_parts.append(
             f'<div style="font-size:16px;font-weight:bold;color:#fff;background:{color};'
@@ -895,6 +967,7 @@ def main():
 
     save_seen(seen)
 
+    all_listings = [_reclassify_type(l) for l in all_listings]
     all_listings = deduplicate(all_listings)
     Path(f"veille_{TODAY}.md").write_text(
         build_report(all_listings, inaccessible), encoding="utf-8"
