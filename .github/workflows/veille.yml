@@ -23,14 +23,8 @@ jobs:
       - name: Vérifier si le Mac a déjà effectué la veille aujourd'hui
         id: check
         run: |
-          TODAY=$(TZ=Europe/Paris date +%Y-%m-%d)
-          if git log --oneline -20 | grep -q "Mac veille ${TODAY}"; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "✓ Mac a déjà tourné aujourd'hui (${TODAY}) — GitHub Actions passe son tour"
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-            echo "Mac n'a pas tourné aujourd'hui (${TODAY}) — lancement de la veille"
-          fi
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "TEST FORCE — check Mac désactivé temporairement"
 
       - name: Restaurer seen_listings.json (mémoire des annonces déjà vues)
         if: steps.check.outputs.skip == 'false'
