@@ -485,134 +485,87 @@ def scrape_weadvisor(seen: dict) -> list:
     return results
 
 
-# ── Scraper LeBonCoin (Playwright) ───────────────────────────────────────────
+# ── Scraper LeBonCoin (curl_cffi + NEXT_DATA — fonctionne depuis GitHub Actions) ──
 LBC_CAT_LABELS = {
-    "8": "Bureau / Local commercial",
-    "9": "Local d'activité",
+    "8":  "Bureau / Local commercial",
+    "9":  "Local d'activité",
+    "13": "Bureau / Local commercial",
 }
 
 
-LBC_STEALTH_JS = """
-    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-    window.chrome = {runtime: {}, loadTimes: () => {}, csi: () => {}, app: {}};
-    Object.defineProperty(navigator, 'plugins', {get: () => ({length: 5})});
-    Object.defineProperty(navigator, 'languages', {get: () => ['fr-FR', 'fr', 'en']});
-    Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'});
-"""
+def scrape_leboncoin(seen: dict) -> list:
+    """curl_cffi imite le TLS fingerprint de Chrome → passe DataDome même depuis GitHub Actions."""
+    try:
+        from curl_cffi import requests as cffi_requests
+    except ImportError:
+        log.warning("LeBonCoin : curl_cffi non installé — pip install curl_cffi")
+        return []
 
-
-async def _scrape_leboncoin_async(seen: dict) -> list:
     results = []
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="fr-FR",
-            viewport={"width": 1280, "height": 800},
-            extra_http_headers={"Accept-Language": "fr-FR,fr;q=0.9"},
-        )
-        await context.add_init_script(LBC_STEALTH_JS)
-        page = await context.new_page()
-        captured_ads: list = []
-        net_log: list = []
+    all_ads = []
 
-        async def intercept(response):
-            url = response.url
-            if "leboncoin" in url:
-                net_log.append(f"{response.status} {url[:120]}")
-            if response.status == 200 and "leboncoin" in url:
-                try:
-                    ct = response.headers.get("content-type", "")
-                    if "json" in ct:
-                        body = await response.json()
-                        if isinstance(body, dict) and "ads" in body:
-                            captured_ads.extend(body["ads"])
-                            log.info(f"LeBonCoin API: {len(body['ads'])} annonces — {url[:80]}")
-                except Exception:
-                    pass
-
-        page.on("response", intercept)
+    for page_num in range(1, 6):   # 5 pages × 35 = ~175 annonces récentes
         try:
-            await page.goto(
-                "https://www.leboncoin.fr/recherche?category=8&locations=Indre-et-Loire_37",
-                timeout=30000,
-                wait_until="networkidle",
+            r = cffi_requests.get(
+                f"https://www.leboncoin.fr/recherche?category=13&locations=d_{DEPT}&page={page_num}",
+                impersonate="chrome124",
+                headers={"Accept-Language": "fr-FR,fr;q=0.9"},
+                timeout=25,
             )
-            await page.wait_for_timeout(4000)
-
-            for entry in net_log[:20]:
-                log.info(f"LBC net: {entry}")
-
-            if not captured_ads:
-                # Fallback : extraire les liens d'annonces directement du DOM
-                log.warning("LeBonCoin : API non interceptée, tentative DOM")
-                ad_hrefs = await page.eval_on_selector_all(
-                    "a[href*='/ad/']",
-                    "els => [...new Set(els.map(e => e.href))].filter(h => h.includes('bureaux') || h.includes('commerce') || h.includes('local'))"
-                )
-                log.info(f"LeBonCoin DOM : {len(ad_hrefs)} liens trouvés")
-                for href in ad_hrefs[:30]:
-                    if not is_new(href, seen):
-                        continue
-                    listing = {
-                        "source": "LeBonCoin",
-                        "type": "Bureau / Local commercial",
-                        "titre": href.split("/")[-1].replace("-", " ").split(".")[0][:80],
-                        "localisation": DEPT_NAME,
-                        "surface": "N/A", "prix": "N/A", "agence": "N/A",
-                        "description": "Voir l'annonce pour les détails",
-                        "url": href, "reference": "", "date": "",
-                    }
-                    results.append(listing)
-                    mark_seen(href, seen)
-                log.info(f"LeBonCoin DOM : {len(results)} nouvelles annonces")
-                return results
-
-            ads_37 = [a for a in captured_ads
-                      if a.get("location", {}).get("department_id") == DEPT]
-            log.info(f"LeBonCoin : {len(captured_ads)} annonces totales, {len(ads_37)} en dept 37")
-
-            for ad in ads_37:
-                url = ad.get("url", "")
-                if not url or not is_new(url, seen):
-                    continue
-                attrs = {a["key"]: a.get("value_label", (a.get("values") or [""])[0])
-                         for a in ad.get("attributes", []) if "key" in a}
-                prix_raw = ad.get("price", [None])[0] if ad.get("price") else None
-                cat_id = str(ad.get("category_id", "8"))
-                imgs = ad.get("images", {})
-                photo = (imgs.get("thumb_url") or
-                         next(iter(imgs.get("urls_thumb", [])), "") or
-                         next(iter(imgs.get("urls", [])), "") or "")
-                listing = {
-                    "source": "LeBonCoin",
-                    "type": LBC_CAT_LABELS.get(cat_id, "Bureau / Local commercial"),
-                    "titre": ad.get("subject", "N/A"),
-                    "localisation": ad.get("location", {}).get("city", DEPT_NAME),
-                    "surface": attrs.get("square", "N/A"),
-                    "prix": f"{prix_raw:,} €".replace(",", " ") if prix_raw else "N/A",
-                    "agence": ad.get("owner", {}).get("name", "Particulier"),
-                    "description": (ad.get("body") or "")[:400],
-                    "url": url, "photo": photo,
-                    "reference": str(ad.get("list_id", "")),
-                    "date": (ad.get("first_publication_date") or "")[:10],
-                }
-                results.append(listing)
-                mark_seen(url, seen)
-
+            r.raise_for_status()
         except Exception as e:
-            log.warning(f"LeBonCoin : {e}")
-        finally:
-            await browser.close()
+            log.warning(f"LeBonCoin page {page_num} : {e}")
+            break
 
-    log.info(f"LeBonCoin : {len(results)} nouvelles annonces en dept 37")
+        soup = BeautifulSoup(r.text, "html.parser")
+        nd = soup.find("script", id="__NEXT_DATA__")
+        if not nd:
+            log.warning(f"LeBonCoin : NEXT_DATA absent page {page_num}")
+            break
+
+        try:
+            data = json.loads(nd.string)
+            ads = (data.get("props", {}).get("pageProps", {})
+                   .get("searchData", {}).get("ads", []))
+        except Exception as e:
+            log.warning(f"LeBonCoin JSON page {page_num} : {e}")
+            break
+
+        if not ads:
+            break
+        all_ads.extend(ads)
+        time.sleep(1)
+
+    log.info(f"LeBonCoin : {len(all_ads)} annonces bureaux/commerces en dept {DEPT}")
+    for ad in all_ads:
+        url = ad.get("url", "")
+        if not url or not is_new(url, seen):
+            continue
+        attrs = {a["key"]: a.get("value_label", (a.get("values") or [""])[0])
+                 for a in ad.get("attributes", []) if "key" in a}
+        prix_raw = ad.get("price", [None])[0] if ad.get("price") else None
+        cat_id = str(ad.get("category_id", "13"))
+        imgs  = ad.get("images", {})
+        photo = (imgs.get("thumb_url") or
+                 next(iter(imgs.get("urls_thumb", [])), "") or
+                 next(iter(imgs.get("urls", [])), "") or "")
+        listing = {
+            "source":       "LeBonCoin",
+            "type":         LBC_CAT_LABELS.get(cat_id, "Bureau / Local commercial"),
+            "titre":        ad.get("subject", "N/A"),
+            "localisation": ad.get("location", {}).get("city", DEPT_NAME),
+            "surface":      attrs.get("square", "N/A"),
+            "prix":         f"{prix_raw:,} €".replace(",", " ") if prix_raw else "N/A",
+            "agence":       ad.get("owner", {}).get("name", "Particulier"),
+            "description":  (ad.get("body") or "")[:400],
+            "url":          url, "photo": photo,
+            "reference":    str(ad.get("list_id", "")),
+            "date":         (ad.get("first_publication_date") or "")[:10],
+        }
+        results.append(listing)
+        mark_seen(url, seen)
+
+    log.info(f"LeBonCoin : {len(results)} nouvelles annonces")
     return results
 
 
@@ -669,8 +622,6 @@ def scrape_imvaloris(seen: dict) -> list:
     return results
 
 
-def scrape_leboncoin(seen: dict) -> list:
-    return asyncio.run(_scrape_leboncoin_async(seen))
 
 
 # ── Scraper Equimmox (Playwright) ─────────────────────────────────────────────
