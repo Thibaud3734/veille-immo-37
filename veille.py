@@ -5,6 +5,7 @@ Version cloud : email via SMTP Office 365
 """
 
 import asyncio
+import base64
 import html as _html
 import json
 import logging
@@ -150,13 +151,47 @@ def abs_url(href: str, base: str) -> str:
 
 
 def _first_photo(soup, base: str) -> str:
+    """Extrait la photo principale : og:image > twitter:image > img (non-logo)."""
     skip = re.compile(r"logo|icon|avatar|banner|sprite|pixel|blank|placeholder|\.svg", re.I)
+    # 1. og:image — la balise la plus fiable sur les sites immo
+    og = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
+    if og and og.get("content"):
+        src = og["content"]
+        if src and not src.startswith("data:") and not skip.search(src):
+            return abs_url(src, base)
+    # 2. twitter:image
+    tw = (soup.find("meta", attrs={"name": "twitter:image"}) or
+          soup.find("meta", property="twitter:image"))
+    if tw and tw.get("content"):
+        src = tw["content"]
+        if src and not src.startswith("data:") and not skip.search(src):
+            return abs_url(src, base)
+    # 3. balises img (attributs src + lazy-loading)
     for img in soup.find_all("img"):
-        for attr in ("src", "data-src", "data-lazy", "data-lazy-src", "data-original"):
+        for attr in ("src", "data-src", "data-lazy", "data-lazy-src", "data-original", "data-image"):
             src = img.get(attr, "")
             if src and not skip.search(src) and not src.startswith("data:"):
                 return abs_url(src, base)
     return ""
+
+
+def _embed_photo(url: str) -> str:
+    """Télécharge l'image et la retourne encodée en base64 (Outlook bloque les images externes)."""
+    if not url or url.startswith("data:"):
+        return url
+    try:
+        r = SESSION.get(url, timeout=12)
+        r.raise_for_status()
+        if len(r.content) > 700_000:   # > 700 KB : garder URL externe (cas rare)
+            return url
+        ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+        if not ct.startswith("image/"):
+            ct = "image/jpeg"
+        b64 = base64.b64encode(r.content).decode()
+        return f"data:{ct};base64,{b64}"
+    except Exception as e:
+        log.warning(f"Embed photo {url[:80]}: {e}")
+        return url   # fallback URL externe
 
 
 # ── Reclassification du type par analyse du titre ────────────────────────────
@@ -327,13 +362,23 @@ def scrape_geolocaux_page(url: str, label: str, seen: dict) -> list:
             r"Chambray|La Riche|Fondettes|Ballan|Sorigny)", titre, re.I
         )
         photo = ""
-        for el in [card] + card.find_all(True, style=True):
+        # background-image CSS ou attributs data-bg* sur la carte et ses enfants
+        for el in [card] + card.find_all(True):
+            # style="background-image: url(...)"
             pm = re.search(r"url\(['\"]?([^)'\"]+)['\"]?\)", el.get("style", ""))
             if pm:
                 src = pm.group(1)
                 if not src.startswith("data:"):
                     photo = abs_url(src, GEOLOCAUX_BASE)
                     break
+            # attributs data-bg / data-background / data-bg-src / data-image
+            for attr in ("data-bg", "data-background", "data-bg-src", "data-image", "data-lazy-bg"):
+                src = el.get(attr, "")
+                if src and not src.startswith("data:"):
+                    photo = abs_url(src, GEOLOCAUX_BASE)
+                    break
+            if photo:
+                break
         if not photo:
             photo = _first_photo(card, GEOLOCAUX_BASE)
         listing = {
@@ -799,6 +844,12 @@ def _card_html(l: dict) -> str:
 
 def build_html_report(all_listings: list, inaccessible: list) -> str:
     e = _html.escape
+    # Encoder les photos en base64 — Outlook bloque systématiquement les images externes
+    log.info(f"Embed photos : {sum(1 for l in all_listings if l.get('photo'))} à télécharger…")
+    all_listings = [
+        {**l, "photo": _embed_photo(l["photo"])} if l.get("photo") else l
+        for l in all_listings
+    ]
     by_type: dict = {}
     for l in all_listings:
         by_type.setdefault(_type_bucket(l), []).append(l)
