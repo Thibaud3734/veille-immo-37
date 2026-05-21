@@ -810,6 +810,14 @@ def _card_html(l: dict) -> str:
         )
     transaction = "Vente" if "Vente" in l["type"] else "Location"
     trans_color = "#b35a00" if transaction == "Vente" else "#0a6eb4"
+    type_short  = l["type"].split(" — ")[0]
+    type_badge_colors = {
+        "Local commercial": "#c0392b",
+        "Bureau":           "#1a5276",
+        "Local d'activité": "#1e5724",
+        "Terrain":          "#6c3483",
+    }
+    type_badge_color = type_badge_colors.get(type_short, "#555")
     desc = e(l.get("description", "N/A") or "N/A")
     desc_row = f'<tr><td colspan="2" style="padding:6px 0 0;font-size:12px;color:#666;">{desc[:200]}</td></tr>' if desc and desc != "N/A" else ""
     return f'''
@@ -818,7 +826,9 @@ def _card_html(l: dict) -> str:
   {photo_td}
   <td valign="top" style="padding:14px 16px;">
     <table cellpadding="0" cellspacing="0" width="100%"><tr>
-      <td><span style="background:{color};color:#fff;padding:2px 9px;border-radius:10px;font-size:11px;font-family:Arial;font-weight:bold;">{e(l["source"])}</span>&nbsp;
+      <td>
+      <span style="background:{color};color:#fff;padding:2px 9px;border-radius:10px;font-size:11px;font-family:Arial;font-weight:bold;">{e(l["source"])}</span>&nbsp;
+      <span style="background:{type_badge_color};color:#fff;padding:2px 9px;border-radius:10px;font-size:11px;font-family:Arial;font-weight:bold;">{e(type_short)}</span>&nbsp;
       <span style="background:{trans_color};color:#fff;padding:2px 9px;border-radius:10px;font-size:11px;font-family:Arial;">{e(transaction)}</span></td>
       <td align="right" style="font-size:11px;color:#999;font-family:Arial;">{e(l.get("date","") or "")}</td>
     </tr></table>

@@ -2,10 +2,9 @@ name: Veille Immobilière 37
 
 on:
   schedule:
-    # 7h00 heure de Paris (UTC+2 en été, UTC+1 en hiver)
-    # En été  (mars-oct) : 7h Paris = 5h UTC
-    # En hiver (oct-mars): 7h Paris = 6h UTC
-    # On choisit 5h UTC — légèrement en avance en hiver, parfait en été
+    # 9h40 heure de Paris — fallback si le Mac (9h30) n'a pas tourné
+    # UTC+2 en été : 9h40 Paris = 7h40 UTC
+    # UTC+1 en hiver: 9h40 Paris = 8h40 UTC
     - cron: '40 7 * * *'
   workflow_dispatch:  # permet de lancer manuellement depuis GitHub
 
@@ -18,26 +17,45 @@ jobs:
     steps:
       - name: Checkout du dépôt
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 20  # historique pour détecter le run Mac du jour
+
+      - name: Vérifier si le Mac a déjà effectué la veille aujourd'hui
+        id: check
+        run: |
+          TODAY=$(TZ=Europe/Paris date +%Y-%m-%d)
+          if git log --oneline -20 | grep -q "Mac veille ${TODAY}"; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "✓ Mac a déjà tourné aujourd'hui (${TODAY}) — GitHub Actions passe son tour"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "Mac n'a pas tourné aujourd'hui (${TODAY}) — lancement de la veille"
+          fi
 
       - name: Restaurer seen_listings.json (mémoire des annonces déjà vues)
+        if: steps.check.outputs.skip == 'false'
         run: |
           if [ ! -f seen_listings.json ]; then
             echo '{}' > seen_listings.json
           fi
 
       - name: Installer Python et les dépendances
+        if: steps.check.outputs.skip == 'false'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
       - name: Installer les packages
+        if: steps.check.outputs.skip == 'false'
         run: pip install -r requirements.txt
 
       - name: Installer Playwright et Chromium
+        if: steps.check.outputs.skip == 'false'
         run: playwright install chromium
 
       - name: Lancer la veille
+        if: steps.check.outputs.skip == 'false'
         env:
           EMAIL_TO:        ${{ secrets.EMAIL_TO }}
           SMTP_USER:       ${{ secrets.SMTP_USER }}
@@ -47,6 +65,7 @@ jobs:
         run: python veille.py
 
       - name: Sauvegarder seen_listings.json et le rapport dans le dépôt
+        if: steps.check.outputs.skip == 'false'
         run: |
           git config user.name  "Veille Bot"
           git config user.email "actions@github.com"
